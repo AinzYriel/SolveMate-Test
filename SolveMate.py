@@ -1,5 +1,11 @@
 from flask import Flask, render_template_string, request, jsonify
 import math
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 app = Flask(__name__)
 
@@ -378,6 +384,37 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    function getExplanation() {
+    const btn = document.getElementById('ai-explain-btn');
+    const loading = document.getElementById('ai-loading');
+    const result = document.getElementById('ai-result');
+    
+    btn.style.display = 'none';
+    loading.style.display = 'block';
+    
+    fetch('/api/explain', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(window.aiData)
+    })
+    .then(r => r.json())
+    .then(data => {
+        loading.style.display = 'none';
+        if(data.error) {
+            result.innerHTML = `❌ ${data.error}`;
+        } else {
+            result.innerHTML = `<strong>💡 AI says:</strong><br>${data.explanation}`;
+        }
+        result.style.display = 'block';
+    })
+    .catch(() => {
+        loading.style.display = 'none';
+        result.innerHTML = '❌ Try again in a moment';
+        result.style.display = 'block';
+        btn.style.display = 'block';
+    });
+}
+
     <script>
         let activeF = null;
 
@@ -449,14 +486,34 @@ HTML_TEMPLATE = """
                 } else {
                     box.style.background = '#dcfce7'; box.style.color = '#166534';
                                                     if(data.steps) {
-                    let stepsHtml = data.steps.map(s => `<div>${s}</div>`).join('');
-                    box.innerHTML = `
-                        <strong>Result: ${data.res.toFixed(4)} ${data.unit}</strong>
-                        <div style="margin-top:8px; font-size:0.9em; text-align:left;">
-                            ${stepsHtml}
-                        </div>
-                    `;
-                } else {
+    let stepsHtml = data.steps.map(s => `<div>${s}</div>`).join('');
+    box.innerHTML = `
+        <strong>✅ Result: ${data.res.toFixed(4)} ${data.unit}</strong>
+        <div style="margin-top:8px; font-size:0.9em; text-align:left;">
+            ${stepsHtml}
+        </div>
+        <div style="margin-top:15px; padding:12px; background:#f3f4f6; border-radius:8px;">
+            <button id="ai-explain-btn" style="width:100%; padding:10px; background:#8b5cf6; color:white; border:none; border-radius:6px; font-weight:bold; cursor:pointer;" onclick="getExplanation()">
+                🤖 Get AI Explanation
+            </button>
+            <div id="ai-loading" style="display:none; margin-top:10px; text-align:center; color:#6b7280;">🤔 AI is thinking...</div>
+            <div id="ai-result" style="display:none; margin-top:10px; padding:10px; background:#eff6ff; border-radius:6px; font-size:0.9em; line-height:1.4;"></div>
+        </div>
+    `;
+    // Store data for AI
+    window.aiData = {
+        formula: activeF.equation,
+        known: Array.from(document.querySelectorAll('#m-inputs input[value]')).map(input => {
+            const label = input.dataset.label;
+            const val = input.value;
+            const unit = document.getElementById('u_' + input.id.split('_')[1]).value;
+            return `${label}=${val} ${unit}`;
+        }).join(', '),
+        target: Array.from(document.querySelectorAll('#m-inputs input')).find(input => !input.value)?.dataset.label || 'result',
+        result: data.res.toFixed(4),
+        unit: data.unit
+    };
+} else {
                     box.innerHTML = `Result: ${data.res.toFixed(4)} ${data.unit}`;
                 }
                 }
@@ -866,7 +923,26 @@ def calculate():
         })
     except Exception:
         return jsonify({'error': 'Check inputs for zero or negative values.'})
-
+@app.route('/api/explain', methods=['POST'])
+def explain_solution():
+    data = request.json
+    prompt = f"""
+    Physics problem explanation:
+    Formula: {data['formula']}
+    Values: {data['known']}
+    Result: {data['target']} = {data['result']} {data['unit']}
+    
+    Give a 2-3 sentence student-friendly explanation.
+    """
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150
+        )
+        return jsonify({'explanation': response.choices[0].message.content.strip()})
+    except:
+        return jsonify({'error': 'AI temporarily unavailable'})
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
