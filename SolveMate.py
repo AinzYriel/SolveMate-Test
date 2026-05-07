@@ -1,5 +1,11 @@
 from flask import Flask, render_template_string, request, jsonify
 import math
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 app = Flask(__name__)
 
@@ -314,6 +320,14 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SolveMate | Physics Library</title>
     <style>
+        #ai-explanation {
+    font-size: 0.95em;
+    line-height: 1.5;
+}
+#explain-btn:hover {
+    background: #2563eb !important;
+    transform: scale(1.02);
+}
         :root { --primary: #3b82f6; --bg: #ffffff; --card: #f8fafc; --text: #1e293b; --border: #e2e8f0; }
         [data-theme='dark'] { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --border: #334155; }
 
@@ -431,37 +445,82 @@ HTML_TEMPLATE = """
         function closeModal() { document.getElementById('modal').style.display = 'none'; }
 
                 function runCalc() {
-            const payload = { fid: activeF.id, vals: {}, units: {} };
-            activeF.vars.forEach(v => {
-                payload.vals[v.name] = document.getElementById(`v_${v.name}`).value;
-                payload.units[v.name] = document.getElementById(`u_${v.name}`).value;
-            });
+    const payload = { fid: activeF.id, vals: {}, units: {} };
+    activeF.vars.forEach(v => {
+        payload.vals[v.name] = document.getElementById(`v_${v.name}`).value;
+        payload.units[v.name] = document.getElementById(`u_${v.name}`).value;
+    });
 
-            fetch('/api/calculate', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload)
-            }).then(r => r.json()).then(data => {
-                const box = document.getElementById('result-box');
-                box.style.display = 'block';
-                if(data.error) {
-                    box.style.background = '#fee2e2'; box.style.color = '#dc2626'; box.innerText = data.error;
-                } else {
-                    box.style.background = '#dcfce7'; box.style.color = '#166534';
-                                                    if(data.steps) {
-                    let stepsHtml = data.steps.map(s => `<div>${s}</div>`).join('');
-                    box.innerHTML = `
-                        <strong>Result: ${data.res.toFixed(4)} ${data.unit}</strong>
-                        <div style="margin-top:8px; font-size:0.9em; text-align:left;">
-                            ${stepsHtml}
-                        </div>
-                    `;
-                } else {
-                    box.innerHTML = `Result: ${data.res.toFixed(4)} ${data.unit}`;
-                }
-                }
-            });
+    fetch('/api/calculate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    }).then(r => r.json()).then(data => {
+        const box = document.getElementById('result-box');
+        box.style.display = 'block';
+        if(data.error) {
+            box.style.background = '#fee2e2'; 
+            box.style.color = '#dc2626'; 
+            box.innerText = data.error;
+        } else {
+            box.style.background = '#dcfce7'; 
+            box.style.color = '#166534';
+            if(data.steps) {
+                let stepsHtml = data.steps.map(s => `<div>${s}</div>`).join('');
+                box.innerHTML = `
+                    <strong>✅ Result: ${data.res.toFixed(4)} ${data.unit}</strong>
+                    <div style="margin-top:8px; font-size:0.9em; text-align:left;">
+                        ${stepsHtml}
+                    </div>
+                    <button id="explain-btn" class="solve-btn" style="margin-top:15px; padding:8px; font-size:0.9em;" 
+                            onclick="getExplanation('${activeF.equation}', ${JSON.stringify(payload.vals).replace(/"/g, '&quot;')}, '${Object.keys(payload.vals).find(k => !payload.vals[k]) || ''}', ${data.res}, '${data.unit}')">
+                        🤖 Get AI Explanation
+                    </button>
+                    <div id="ai-explanation" style="margin-top:10px; padding:15px; background:#f0f9ff; border-radius:8px; display:none; border-left:4px solid #3b82f6;"></div>
+                `;
+            } else {
+                box.innerHTML = `Result: ${data.res.toFixed(4)} ${data.unit}`;
+            }
         }
+    });
+}
+function getExplanation(formula, vals, target, result, unit) {
+    const btn = document.getElementById('explain-btn');
+    const aiBox = document.getElementById('ai-explanation');
+    
+    // Show loading
+    btn.innerText = '🤖 AI Thinking...';
+    btn.disabled = true;
+    aiBox.style.display = 'block';
+    aiBox.innerHTML = '<div style="text-align:center; opacity:0.7;">✨ Generating explanation...</div>';
+    
+    // Prepare known values (exclude empty)
+    const known = {};
+    for(let key in vals) {
+        if(vals[key] !== '') known[key] = vals[key];
+    }
+    
+    fetch('/api/explain', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({formula, known, target, result, unit})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if(data.error) {
+            aiBox.innerHTML = `<div style="color:#dc2626;">❌ ${data.error}</div>`;
+        } else {
+            aiBox.innerHTML = `<strong>🤖 AI Explanation:</strong><br>${data.explanation}`;
+        }
+        btn.innerText = '✅ Explanation Generated';
+        btn.disabled = false;
+    })
+    .catch(() => {
+        aiBox.innerHTML = '<div style="color:#dc2626;">❌ Network error. Try again.</div>';
+        btn.innerText = '🤖 Get AI Explanation';
+        btn.disabled = false;
+    });
+}
     </script>
 </body>
 </html>
@@ -866,6 +925,38 @@ def calculate():
         })
     except Exception:
         return jsonify({'error': 'Check inputs for zero or negative values.'})
+    @app.route('/api/explain', methods=['POST'])
+def explain_solution():
+    try:
+        data = request.json
+        formula = data.get('formula')
+        known = data.get('known', {})
+        target = data.get('target')
+        result = data.get('result')
+        unit = data.get('unit')
+        
+        prompt = f"""
+        You are a physics teacher explaining a solution to a student.
+        
+        Problem: Using formula "{formula}"
+        Known values: {known}
+        Solved for: {target} = {result} {unit}
+        
+        Give a clear, step-by-step explanation in simple language.
+        Use analogies if helpful. Keep it under 200 words.
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300
+        )
+        
+        return jsonify({
+            'explanation': response.choices[0].message.content.strip()
+        })
+    except Exception as e:
+        return jsonify({'error': f'AI service unavailable: {str(e)}'})
 
 
 if __name__ == '__main__':
